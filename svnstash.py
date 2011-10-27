@@ -35,6 +35,9 @@ def command(*aliases):
 	
 	return call
 
+class StashError(Exception):
+	pass
+
 class Stashes(object):
 	""" Tracks the stashes. """
 	
@@ -57,11 +60,11 @@ class Stashes(object):
 			wd = os.path.dirname(wd)
 	
 		if not parent:
-			raise Exception('could not find SVN root')
+			raise StashError('could not find SVN root')
 		
 		self.svn_env = {
 			'root': os.path.realpath(parent), #get the abs path to the root
-			'child': os.path.relpath('/'.join(child.split('/')[1:])), #from trunk/test/some, remove trunk
+			'child': os.path.relpath('/'.join(child.split('/')[1:]) or './'), #from trunk/test/some, remove trunk
 			'abs_child': os.getcwd()
 		}
 		
@@ -78,7 +81,7 @@ class Stashes(object):
 				os.makedirs(STASH_PATH)
 		except:
 			if not os.path.exists(STASH_PATH):
-				raise Exception('could not create stash directory')
+				raise StashError('could not create stash directory')
 	
 	def __len__(self):
 		return len(self.__data)
@@ -106,7 +109,7 @@ class Stashes(object):
 	
 	def save(self, comment=''):
 		if not self.wd_changes_exist():
-			raise Exception('there are no changes in working copy to stash')
+			raise StashError('there are no changes in working copy to stash')
 	
 		s = Stash(self.svn_env['child'], comment=comment)
 		
@@ -126,7 +129,7 @@ class Stashes(object):
 	
 	def apply(self, i):
 		if i < 0 or len(self.__data) <= i:
-			raise Exception('no stash with index "%d" exists.' % i)
+			raise StashError('no stash with index "%d" exists.' % i)
 		
 		s = self.__data[i]
 		s.apply()
@@ -153,7 +156,7 @@ class Stash(object):
 		return '%s  %s  %s %s' % (
 			self.size,
 			datetime.fromtimestamp(self.created).strftime('%H:%m %d-%m-%y'),
-			self.wd,
+			self.wd if self.wd != '.' else '<root>',
 			'- %s' % self.comment if len(self.comment) else ''
 		)
 	
@@ -182,7 +185,7 @@ class Stash(object):
 	
 	def apply(self):
 		if stashes.wd_changes_exist():
-			raise Exception('local changes exist; please stash or revert them.')
+			raise StashError('local changes exist; please stash or revert them.')
 		
 		subprocess.Popen(['patch', '-s', '-p0', '--binary', '-i', self.get_file_path()]).wait()
 		for f in self.get_affected_files():
@@ -245,7 +248,7 @@ def _bash():
 		else:
 			for k in commands.keys():
 				print k
-	except Exception:
+	except StashError:
 		print '<error>'
 		sys.exit()
 
@@ -281,7 +284,7 @@ def list():
 	"""
 		usage: svnstash list
 		
-		Shows the list of all stashes, sorted by date
+		Shows the list of all stashes, sorted by date.  All paths displayed are relative to the root of the repository.
 	"""
 	stashes.list()
 	
@@ -320,7 +323,7 @@ def remove():
 		Removes a stash without applying it
 	"""
 	if len(sys.argv) < 3:
-		raise Exception('you must provide an index to delete')
+		raise StashError('you must provide an index to delete')
 	
 	del stashes[int(sys.argv[2])]
 
@@ -352,7 +355,7 @@ def main():
 			stashes.cleanup()
 		else:
 			help()
-	except Exception as e:
+	except StashError as e:
 		print 'Error: %s' % e.message
 
 if __name__ == "__main__":
