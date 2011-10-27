@@ -252,9 +252,9 @@ def _bash():
 @command()
 def apply():
 	"""
-		usage: svnstash apply [id/index]
+		usage: svnstash apply [index]
 		
-		Applies the most recent stash or the one given by [id/index] without deleting the stash
+		Applies the most recent stash or the one given by [index] without deleting the stash
 	"""
 	if len(sys.argv) == 3:
 		i = int(sys.argv[2])
