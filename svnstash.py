@@ -15,6 +15,8 @@ except:
 	import pickle
 
 STASH_PATH = '.svn/stash'
+SVN_DIVIDER = '------------------------------------------------------------------------'
+EXTERNAL_DEPENDENCIES = ('svn', 'lsdiff', ('cdiff', 'colordiff'))
 
 commands = {}
 help_list = {}
@@ -27,32 +29,20 @@ class Env(object):
 	__props = {}
 	
 	def __getattr__(self, attr):
-		attr = attr.lstrip('has_')
+		if attr.startswith('has_'):
+			attr = attr[4:]
+			
+			if not self.__props.has_key(attr):
+				self.__props[attr] = len(subprocess.check_output(['which', attr])) > 0
 		
-		if not self.__props.has_key(attr):
-			self.__props[attr] = len(subprocess.check_output(['which', attr])) > 0
+			return self.__props[attr]
 		
-		return self.__props[attr]
+		raise AttributeError('key "%s" not found' % attr)
 
 class CmdTools(object):
 	""" Wraps some of the common svn functions that are needed """
 	
 	def get_root(self):
-		pass
-	
-	def changes_exist(self, dir):
-		pass
-
-class Stashes(object):
-	""" Tracks the stashes. """
-	
-	__built = False
-	
-	__DATA_FILE = '%s.data' % STASH_PATH
-	
-	def __init__(self):
-		""" Finds the root of the svn repo and sets the svn_env variables """
-		
 		wd = os.getcwd()
 		child = ''
 		parent = ''
@@ -67,11 +57,69 @@ class Stashes(object):
 		if not parent:
 			raise StashError('could not find SVN root')
 		
-		self.svn_env = {
+		return {
 			'root': os.path.realpath(parent), #get the abs path to the root
 			'child': os.path.relpath('/'.join(child.split('/')[1:]) or './'), #from trunk/test/some, remove trunk
 			'abs_child': os.getcwd()
 		}
+	
+	def svn_get_status(self, child_dir):
+		return subprocess.check_output(['svn', 'status', child_dir])
+	
+	def svn_changes_exist(self, child_dir):
+		return len(self.svn_get_status(child_dir)) > 0
+	
+	def svn_write_diff(self, wd, f):
+		subprocess.Popen(['svn', 'diff', '--force', '--diff-cmd', '/usr/bin/diff', '-x', '-au --binary', wd], stdout=f).wait()
+	
+	def svn_remove(self, path):
+		subprocess.check_output(['svn', 'remove', '--force', path])
+	
+	def svn_add(self, path):
+		subprocess.check_output(['svn', 'add', '-q', '--parents', path])
+	
+	def svn_revert(self, path):
+		subprocess.check_output(['svn', 'revert', '--depth=infinity', path])
+	
+	def patch(self, diff_path):
+		subprocess.Popen(['patch', '-s', '-p0', '--binary', '-i', diff_path]).wait()
+	
+	def color_diff(self, diff_path):
+		if not env.has_cdiff and not env.has_colordiff:
+			#term-ansicolor uses cdiff which will use colordiff if available, or fallback to its own stuff
+			raise StashException('you need to install the gem `term-ansicolor` or `colordiff` in order to get colored output.')
+		
+		if env.has_cdiff:
+			return subprocess.check_output(['cdiff', diff_path])
+		elif env.has_colordiff:
+			with open(diff_path) as f:
+				return subprocess.check_output(['colordiff'], stdin=f)
+	
+	def files_in_diff(self, diff, include_status=False):
+		if env.has_lsdiff:
+			args = ['lsdiff', diff]
+			include_status and args.append('--status')
+			files = subprocess.check_output(args).split('\n')[:-1] #don't include the last newline
+		else:
+			file_indicator = 'Index: '
+			fi_len = len(file_indicator)
+			
+			with open(self.get_file_path()) as f:
+				files = ['? ' + l[fi_len:].strip() for l in f if l.find(file_indicator) != -1]
+		
+		return files 
+	
+class Stashes(object):
+	""" Tracks the stashes. """
+	
+	__built = False
+	
+	__DATA_FILE = '%s.data' % STASH_PATH
+	
+	def __init__(self):
+		""" Finds the root of the svn repo and sets the svn_env variables """
+		
+		self.svn_env = cmds.get_root()
 		
 		os.chdir(self.svn_env['root'])
 		
@@ -101,9 +149,6 @@ class Stashes(object):
 		with open(self.__DATA_FILE, 'w') as f:
 			pickle.dump(self.__data, f)
 	
-	def wd_changes_exist(self):
-		return len(subprocess.check_output(['svn', 'status', self.svn_env['child']])) > 0
-	
 	def list(self, show_files=False):
 		for i, s in enumerate(self.__data):
 			print '%-2d | %s' % (i, s.get_printable())
@@ -115,13 +160,15 @@ class Stashes(object):
 				
 				for f in s.get_affected_files(include_status=True):
 					print '\t%s' % status[f[0]] + ' ' + f[2:]
+				
+				print SVN_DIVIDER
 	
 	def push(self, comment=''):
 		s = self.save(comment)
 		s.revert()
 	
 	def save(self, comment=''):
-		if not self.wd_changes_exist():
+		if not cmds.svn_changes_exist(self.svn_env['child']):
 			raise StashError('there are no changes in working copy to stash')
 	
 		s = Stash(self.svn_env['child'], comment=comment)
@@ -165,9 +212,6 @@ class Stash(object):
 	def __str__(self):
 		return self.id
 	
-	def wd_changes_exist(self):
-		return len(subprocess.check_output(['svn', 'status', self.wd])) > 0
-	
 	def get_printable(self):
 		return '%s | %s | %s %s' % (
 			self.size,
@@ -180,64 +224,44 @@ class Stash(object):
 		return '%s/%s.diff' % (STASH_PATH, self.id)
 	
 	def get_affected_files(self, include_status=False):
-		if env.has_lsdiff:
-			args = ['lsdiff', self.get_file_path()]
-			include_status and args.append('--status')
-			files = subprocess.check_output(args).split('\n')[:-1] #don't include the last newline
-		else:
-			if include_status:
-				print 'Warning: install `lsdiff` (a part of patchutils) to get more detailed output.'
+		return cmds.files_in_diff(self.get_file_path(), include_status=include_status)
 			
-			with open(self.get_file_path()) as f:
-				files = ['? ' + l.lstrip('Index: ').strip() for l in f if l.find('Index: ') != -1]
-		
-		return files 
-	
 	def save(self):
 		#save the changes to the diff file
 		with open(self.get_file_path(), 'w') as diff:
-			subprocess.Popen(['svn', 'diff', '--force', '--diff-cmd', '/usr/bin/diff', '-x', '-au --binary', self.wd], stdout=diff).wait()
+			cmds.svn_write_diff(self.wd, diff)
 		
 		self.size = _human_readable_size(os.stat(self.get_file_path()).st_size)
 		
 	def revert(self):
 		#remove any added files
-		for f in subprocess.check_output(['svn', 'status', self.wd]).split('\n'):
+		for f in cmds.svn_get_status(self.wd).split('\n'):
 			if f.startswith('A'):
-				subprocess.check_output(['svn', 'remove', '--force', f.lstrip('A').strip()])
+				#f[2:]: strip off the string "A "
+				cmds.svn_remove(f[2:].strip())
 		
-		#revert the directory
-		subprocess.check_output(['svn', 'revert', '--depth=infinity', self.wd])	
+		cmds.revert(self.wd)
 	
 	def apply(self):
-		if self.wd_changes_exist():
+		if cmd.svn_changes_exist(self.wd):
 			raise StashError('local changes exist; please stash or revert them.')
 		
-		subprocess.Popen(['patch', '-s', '-p0', '--binary', '-i', self.get_file_path()]).wait()
+		cmds.patch(self.get_file_path())
 		for f in self.get_affected_files():
 			if not os.path.exists(f):
 				continue
 			
 			if os.stat(f).st_size == 0:
-				subprocess.check_output(['svn', 'remove', '--force', f])
+				cmds.svn_remove(f)
 			else:
-				subprocess.check_output(['svn', 'add', '-q', '--parents', f])
+				cmds.svn_add(f)
 		
 	def delete(self):
 		os.remove(self.get_file_path())
 	
 	def dump(self, with_color=False):
-		if with_color and not env.has_cdiff and not env.has_colordiff:
-			with_color = False
-			#term-ansicolor uses cdiff which will use colordiff if available, or fallback to its own stuff
-			print 'Warning: install the gem `term-ansicolor` or `colordiff` in order to get colored output.'
-		
 		if with_color:
-			if env.has_cdiff:
-				print subprocess.check_output(['cdiff', self.get_file_path()])
-			elif env.has_colordiff:
-				with open(self.get_file_path()) as f:
-					print subprocess.check_output(['colordiff'], stdin=f)
+			print cmds.color_diff(self.get_file_path())
 		else:
 			with open(self.get_file_path()) as f:
 				print f.read()
@@ -338,7 +362,7 @@ Prints general information about a command"""
 
 @command('ls')
 def list():
-	"""usage: svnstash list
+	"""usage: svnstash list [options]
 
 Shows the list of all stashes, sorted by date.  All paths displayed are relative to the root of the repository.
 
@@ -394,6 +418,24 @@ Removes a stash without applying it"""
 	del stashes[int(sys.argv[2])]
 
 @command()
+def dependencies():
+	"""usage: svnstash dependencies
+
+Prints the status of external dependencies for svnstash"""
+	
+	print 'External commands that svnstash relies on.  Only `svn` is required.'
+	
+	for r in EXTERNAL_DEPENDENCIES:
+		if isinstance(r, tuple):
+			name = ' or '.join(r)
+			present = any(getattr(env, 'has_%s' % i) for i in r)
+		else:
+			name = r
+			present = getattr(env, 'has_%s' % r)
+		
+		print '%20s: %s' % (name, 'Yes' if present else 'No')
+
+@command()
 def save():
 	"""usage: svnstash save [comment]
 
@@ -407,7 +449,7 @@ Saves everything in the working directory, with an optional [comment], without r
 
 @command()
 def show():
-	""" usage: svnstash show index
+	""" usage: svnstash show index [options]
 
 Show the changes made in the given stash.  Be careful with binary diffs.
 
