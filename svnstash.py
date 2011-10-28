@@ -1,6 +1,8 @@
 #!/usr/bin/env python2.7
 
-import os, sys
+import getopt
+import os
+import sys
 import subprocess
 import time
 import uuid
@@ -17,26 +19,29 @@ STASH_PATH = '.svn/stash'
 commands = {}
 help_list = {}
 
-def command(*aliases):
-	def call(fn, *a, **k):
-		name = fn.__name__
-		help = []
-		
-		commands[name] = fn
-		
-		#aliases are the same command
-		for a in aliases:
-			commands[a] = fn
-			help.append(a)
-		
-		help_list[name] = help
-		
-		return fn
-	
-	return call
-
 class StashError(Exception):
 	pass
+
+class Env(object):
+	__slots__ = ['props']
+	__props = {}
+	
+	def __getattr__(self, attr):
+		attr = attr.lstrip('has_')
+		
+		if not self.__props.has_key(attr):
+			self.__props[attr] = len(subprocess.check_output(['which', attr])) > 0
+		
+		return self.__props[attr]
+
+class CmdTools(object):
+	""" Wraps some of the common svn functions that are needed """
+	
+	def get_root(self):
+		pass
+	
+	def changes_exist(self, dir):
+		pass
 
 class Stashes(object):
 	""" Tracks the stashes. """
@@ -99,9 +104,17 @@ class Stashes(object):
 	def wd_changes_exist(self):
 		return len(subprocess.check_output(['svn', 'status', self.svn_env['child']])) > 0
 	
-	def list(self):
-		for i, f in enumerate(self.__data):
-			print '%-2d | %s' % (i, f.get_printable())
+	def list(self, show_files=False):
+		for i, s in enumerate(self.__data):
+			print '%-2d | %s' % (i, s.get_printable())
+			
+			if show_files:
+				print 'Changed paths:'
+				
+				status = {'?': '?', '-': 'D', '+': 'A', '!': 'M'}
+				
+				for f in s.get_affected_files(include_status=True):
+					print '\t%s' % status[f[0]] + ' ' + f[2:]
 	
 	def push(self, comment=''):
 		s = self.save(comment)
@@ -152,10 +165,13 @@ class Stash(object):
 	def __str__(self):
 		return self.id
 	
+	def wd_changes_exist(self):
+		return len(subprocess.check_output(['svn', 'status', self.wd])) > 0
+	
 	def get_printable(self):
-		return '%s  %s  %s %s' % (
+		return '%s | %s | %s %s' % (
 			self.size,
-			datetime.fromtimestamp(self.created).strftime('%H:%m %d-%m-%y'),
+			datetime.fromtimestamp(self.created).ctime(),
 			self.wd if self.wd != '.' else '<root>',
 			'- %s' % self.comment if len(self.comment) else ''
 		)
@@ -163,9 +179,19 @@ class Stash(object):
 	def get_file_path(self):
 		return '%s/%s.diff' % (STASH_PATH, self.id)
 	
-	def get_affected_files(self):
-		with open(self.get_file_path()) as f:
-			return [l.lstrip('Index: ').strip() for l in f if l.find('Index: ') != -1] 
+	def get_affected_files(self, include_status=False):
+		if env.has_lsdiff:
+			args = ['lsdiff', self.get_file_path()]
+			include_status and args.append('--status')
+			files = subprocess.check_output(args).split('\n')[:-1] #don't include the last newline
+		else:
+			if include_status:
+				print 'Warning: install `lsdiff` (a part of patchutils) to get more detailed output.'
+			
+			with open(self.get_file_path()) as f:
+				files = ['? ' + l.lstrip('Index: ').strip() for l in f if l.find('Index: ') != -1]
+		
+		return files 
 	
 	def save(self):
 		#save the changes to the diff file
@@ -184,7 +210,7 @@ class Stash(object):
 		subprocess.check_output(['svn', 'revert', '--depth=infinity', self.wd])	
 	
 	def apply(self):
-		if stashes.wd_changes_exist():
+		if self.wd_changes_exist():
 			raise StashError('local changes exist; please stash or revert them.')
 		
 		subprocess.Popen(['patch', '-s', '-p0', '--binary', '-i', self.get_file_path()]).wait()
@@ -200,6 +226,40 @@ class Stash(object):
 	def delete(self):
 		os.remove(self.get_file_path())
 	
+	def dump(self, with_color=False):
+		if with_color and not env.has_cdiff and not env.has_colordiff:
+			with_color = False
+			#term-ansicolor uses cdiff which will use colordiff if available, or fallback to its own stuff
+			print 'Warning: install the gem `term-ansicolor` or `colordiff` in order to get colored output.'
+		
+		if with_color:
+			if env.has_cdiff:
+				print subprocess.check_output(['cdiff', self.get_file_path()])
+			elif env.has_colordiff:
+				with open(self.get_file_path()) as f:
+					print subprocess.check_output(['colordiff'], stdin=f)
+		else:
+			with open(self.get_file_path()) as f:
+				print f.read()
+
+def command(*aliases):
+	def call(fn, *a, **k):
+		name = fn.__name__
+		help = []
+		
+		commands[name] = fn
+		
+		#aliases are the same command
+		for a in aliases:
+			commands[a] = fn
+			help.append(a)
+		
+		help_list[name] = help
+		
+		return fn
+	
+	return call
+
 def _help_general():
 	print """usage: svnstash <command> [args ...]
 
@@ -219,14 +279,14 @@ Available subcommands:"""
 		print '\t%s %s' % (k, '(%s)' % ', '.join(aliases) if len(aliases) else '')
 
 def _help_command(cmd):
-	print '\n'.join([l.strip() for l in commands[cmd].__doc__.split('\n') if len(l) > 1])
+	print commands[cmd].__doc__
 
 def _human_readable_size(num):
 	#from: http://stackoverflow.com/questions/1094841/reusable-library-to-get-human-readable-version-of-file-size
-    for x in ['B','K','M','G','T']:
-        if num < 1024.0:
-            return "%3.0f%s" % (num, x)
-        num /= 1024.0
+	for x in ['B','K','M','G','T']:
+		if num < 1024.0:
+			return "%3.0f%s" % (num, x)
+		num /= 1024.0
 
 def _bash():
 	global stashes
@@ -254,11 +314,10 @@ def _bash():
 
 @command()
 def apply():
-	"""
-		usage: svnstash apply [index]
-		
-		Applies the most recent stash or the one given by [index] without deleting the stash
-	"""
+	"""usage: svnstash apply [index]
+
+Applies the most recent stash or the one given by [index] without deleting the stash"""
+
 	if len(sys.argv) == 3:
 		i = int(sys.argv[2])
 	else:
@@ -268,11 +327,9 @@ def apply():
 
 @command()
 def help():
-	"""
-		usage: svnstash help <command>
-		
-		Prints general information about a command
-	"""
+	"""usage: svnstash help <command>
+
+Prints general information about a command"""
 	
 	if len(sys.argv) == 3 and commands[sys.argv[2]]:
 		_help_command(sys.argv[2])
@@ -281,20 +338,31 @@ def help():
 
 @command('ls')
 def list():
-	"""
-		usage: svnstash list
-		
-		Shows the list of all stashes, sorted by date.  All paths displayed are relative to the root of the repository.
-	"""
-	stashes.list()
+	"""usage: svnstash list
+
+Shows the list of all stashes, sorted by date.  All paths displayed are relative to the root of the repository.
+
+Options:
+	-v, --verbose	print extra information about the stash"""
+	
+	opts = {
+		'show_files': False
+	}
+	
+	optlist, args = getopt.getopt(sys.argv[2:], 'v', ['verbose'])
+	
+	for o, a in optlist:
+		if o in ('-v', '--verbose'):
+			opts['show_files'] = True
+	
+	stashes.list(**opts)
 	
 @command()
 def pop():
-	"""
-		usage: svnstash pop [index]
-		
-		Unstashes the most recent stash or the one given by [index]
-	"""
+	"""usage: svnstash pop [index]
+
+Unstashes the most recent stash or the one given by [index]"""
+
 	if len(sys.argv) == 3:
 		i = int(sys.argv[2])
 	else:
@@ -304,11 +372,10 @@ def pop():
 
 @command()
 def push():
-	"""
-		usage: svnstash push [comment]
+	"""usage: svnstash push [comment]
 
-		Stashes everything in the working directory, with an optional [comment]
-	"""
+Stashes everything in the working directory, with an optional [comment]"""
+
 	comment = ''
 	if len(sys.argv) > 2:
 		comment = ' '.join(sys.argv[2:])
@@ -317,11 +384,10 @@ def push():
 
 @command('rm')
 def remove():
-	"""
-		usage: svnstash remove index
+	"""usage: svnstash remove index
 
-		Removes a stash without applying it
-	"""
+Removes a stash without applying it"""
+
 	if len(sys.argv) < 3:
 		raise StashError('you must provide an index to delete')
 	
@@ -329,22 +395,45 @@ def remove():
 
 @command()
 def save():
-	"""
-		usage: svnstash save [comment]
+	"""usage: svnstash save [comment]
 
-		Saves everything in the working directory, with an optional [comment], without reverting
-	"""
+Saves everything in the working directory, with an optional [comment], without reverting"""
+	
 	comment = ''
 	if len(sys.argv) > 2:
 		comment = ' '.join(sys.argv[2:])
 	
 	stashes.save(comment)
 
+@command()
+def show():
+	""" usage: svnstash show index
+
+Show the changes made in the given stash.  Be careful with binary diffs.
+
+Options:
+	-c, --with-color	Shows the diff with colored output"""
+	
+	if len(sys.argv) < 3:
+		raise StashError('you must provide an index to show')
+	
+	opts = {
+		'with_color': False
+	}
+	
+	optlist, args = getopt.getopt(sys.argv[3:], 'c', ['with-color'])
+	
+	for o, a in optlist:
+		if o in ('-c', '--with-color'):
+			opts['with_color'] = True
+	
+	stashes[int(sys.argv[2])].dump(**opts)
+
 def main():
 	global stashes
 	
 	try:
-		command = sys.argv[1] if len(sys.argv) > 1 else 'push'
+		command = sys.argv[1] if len(sys.argv) > 1 else 'list'
 		
 		#bash is all kinds of special
 		if command == 'bash':
@@ -357,6 +446,9 @@ def main():
 			help()
 	except StashError as e:
 		print 'Error: %s' % e.message
+
+env = Env()
+cmds = CmdTools()
 
 if __name__ == "__main__":
 	main()
