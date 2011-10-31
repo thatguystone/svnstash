@@ -2,24 +2,35 @@
 
 import getopt
 import os
+import shutil
 import sys
 import subprocess
 import time
 import uuid
 from datetime import datetime
-from functools import wraps
+from xml.etree import ElementTree
 
 try:
 	import cPickle as pickle
 except:
 	import pickle
 
+#useful constants
 STASH_PATH = '.svn/stash'
-SVN_DIVIDER = '------------------------------------------------------------------------'
-EXTERNAL_DEPENDENCIES = ('svn', 'lsdiff', ('cdiff', 'colordiff'))
+EXTERNAL_DEPENDENCIES = ('svn', 'svnversion', 'lsdiff', ('cdiff', 'colordiff'))
+SVN_DIVIDER = '-'*72
+
+class STATUS(object):
+	MAP = {'?': '?', '-': 'D', '+': 'A', '!': 'M'}
+	UNKNOWN = MAP['?']
+	DELETED = MAP['-']
+	ADDED = MAP['+']
+	MODIFIED = MAP['!']
 
 commands = {}
 help_list = {}
+
+interactive = True
 
 class StashError(Exception):
 	pass
@@ -33,14 +44,55 @@ class Env(object):
 			attr = attr[4:]
 			
 			if not self.__props.has_key(attr):
-				self.__props[attr] = len(subprocess.check_output(['which', attr])) > 0
+				try:
+					subprocess.check_output(['which', attr])
+					self.__props[attr] = True
+				except subprocess.CalledProcessError:
+					self.__props[attr] = False
 		
 			return self.__props[attr]
 		
 		raise AttributeError('key "%s" not found' % attr)
 
+class SvnLog(object):
+	__slots__ = ['__log']
+	
+	def __init__(self, xml_log):
+		self.__log = ElementTree.XML(xml_log)
+	
+	def __len__(self):
+		return len(self.__log)
+	
+	def __getitem__(self, i):
+		return SvnRevision(self.__log[i])
+
+class SvnRevision(object):
+	__slots__ = ['__rev']
+	
+	def __init__(self, rev):
+		self.__rev = rev
+	
+	def was_deleted(self, path):
+		""" Tells whether a path was deleted; will be True if the path was moved, too """
+		for p in self.__rev.find('paths'):
+			if p.text.lstrip('/') == path and p.get('action') == STATUS.DELETED:
+				return True
+		
+		return False
+	
+	def get_new_path(self, path):
+		for p in self.__rev.find('paths'):
+			copy_path = p.get('copyfrom-path')
+			if copy_path and copy_path.lstrip('/') == path:
+				return p.text.lstrip('/')
+			
+		return None
+	
 class CmdTools(object):
 	""" Wraps some of the common svn functions that are needed """
+	
+	diff_file_indicator = 'Index: '
+	diff_fi_len = len(diff_file_indicator)
 	
 	def get_root(self):
 		wd = os.getcwd()
@@ -63,11 +115,14 @@ class CmdTools(object):
 			'abs_child': os.getcwd()
 		}
 	
-	def svn_get_status(self, child_dir):
-		return subprocess.check_output(['svn', 'status', child_dir])
+	def svn_update(self, path):
+		subprocess.check_output(['svn', 'update', path])
+	
+	def svn_changes(self, child_dir):
+		return [(f[0], f[1:].strip()) for f in subprocess.check_output(['svn', 'status', child_dir]).split('\n')[:-1]]
 	
 	def svn_changes_exist(self, child_dir):
-		return len(self.svn_get_status(child_dir)) > 0
+		return len(self.svn_changes(child_dir)) > 0
 	
 	def svn_write_diff(self, wd, f):
 		subprocess.Popen(['svn', 'diff', '--force', '--diff-cmd', '/usr/bin/diff', '-x', '-au --binary', wd], stdout=f).wait()
@@ -81,13 +136,19 @@ class CmdTools(object):
 	def svn_revert(self, path):
 		subprocess.check_output(['svn', 'revert', '--depth=infinity', path])
 	
+	def svn_revision(self, path, from_server=False):
+		return int(subprocess.check_output(['svnversion', path]).strip('MSP\n').split(':')[int(from_server)])
+	
+	def svn_log(self, path, start=0, end='HEAD'):
+		return SvnLog(subprocess.check_output(['svn', 'log', '--xml', '-v', '-r', '%s:%s' % (str(start), str(end))]))
+	
 	def patch(self, diff_path):
-		subprocess.Popen(['patch', '-s', '-p0', '--binary', '-i', diff_path]).wait()
+		subprocess.Popen(['patch', '--forward', '-p0', '--binary', '--batch', '-s', '-i', diff_path], stderr=subprocess.PIPE, stdout=subprocess.PIPE).wait()
 	
 	def color_diff(self, diff_path):
 		if not env.has_cdiff and not env.has_colordiff:
 			#term-ansicolor uses cdiff which will use colordiff if available, or fallback to its own stuff
-			raise StashException('you need to install the gem `term-ansicolor` or `colordiff` in order to get colored output.')
+			raise StashError('you need to install the gem `term-ansicolor` or `colordiff` in order to get colored output.')
 		
 		if env.has_cdiff:
 			return subprocess.check_output(['cdiff', diff_path])
@@ -101,13 +162,55 @@ class CmdTools(object):
 			include_status and args.append('--status')
 			files = subprocess.check_output(args).split('\n')[:-1] #don't include the last newline
 		else:
-			file_indicator = 'Index: '
-			fi_len = len(file_indicator)
 			
-			with open(self.get_file_path()) as f:
-				files = ['? ' + l[fi_len:].strip() for l in f if l.find(file_indicator) != -1]
+			status = '? ' if include_status else ''
+			
+			with open(diff) as f:
+				files = [status + l[self.diff_fi_len:].strip() for l in f if l.find(self.diff_file_indicator) != -1]
 		
-		return files 
+		if include_status:
+			files = [(STATUS.MAP[f[0]], f[2:]) for f in files]
+		
+		return files
+	
+	def diff_move_files(self, diff, files):
+		orig_diff = diff + '.old'
+		shutil.move(diff, orig_diff)
+		
+		#have to keep state...arg, there has to be a better way to do this
+		track_file = False
+		
+		#zomg that's a lot of indentation
+		try:
+			with open(orig_diff) as od, open(diff, 'w') as nd:
+				for l in od:
+					if l.startswith(self.diff_file_indicator):
+						name = l[self.diff_fi_len:].strip()
+						if name in files:
+							track_file = True
+							name = files[name]
+						
+						nd.write('%s%s\n' % (self.diff_file_indicator, name))
+					elif l.startswith('---'):
+						nd.write('--- %s\n' % name)
+					elif l.startswith('+++'):
+						nd.write('+++ %s\n' % name)
+						track_file = False
+					else:
+						nd.write(l)
+			
+			os.remove(orig_diff)
+		except:
+			#revert the diffs if something goes wrong
+			shutil.move(orig_diff, diff)
+			raise
+	
+	def user_confirm(self, msg):
+		""" A wrapper to help with unit testing """
+		if interactive:
+			return raw_input('%s (y,n)' % msg).lower() in ('y', 'ye', 'yes', 'true')
+		else:
+			return interactive_response
 	
 class Stashes(object):
 	""" Tracks the stashes. """
@@ -156,10 +259,8 @@ class Stashes(object):
 			if show_files:
 				print 'Changed paths:'
 				
-				status = {'?': '?', '-': 'D', '+': 'A', '!': 'M'}
-				
 				for f in s.get_affected_files(include_status=True):
-					print '\t%s' % status[f[0]] + ' ' + f[2:]
+					print '\t%s' % f[0] + ' ' + f[1]
 				
 				print SVN_DIVIDER
 	
@@ -197,11 +298,13 @@ class Stashes(object):
 		return s
 
 class Stash(object):
-	def __init__(self, wd, created=time.time(), comment=''):
+	def __init__(self, wd, comment=''):
 		self.id = str(uuid.uuid4())
 		self.wd = wd
-		self.created = created
 		self.comment = comment
+		
+		self.created = time.time()
+		self.revision = cmds.svn_revision(self.wd)
 	
 	def __repr__(self):
 		return '<%s>' % self.get_printable()
@@ -235,18 +338,54 @@ class Stash(object):
 		
 	def revert(self):
 		#remove any added files
-		for f in cmds.svn_get_status(self.wd).split('\n'):
-			if f.startswith('A'):
+		for f in cmds.svn_changes(self.wd):
+			if f[0] == STATUS.ADDED:
 				#f[2:]: strip off the string "A "
-				cmds.svn_remove(f[2:].strip())
+				cmds.svn_remove(f[1])
 		
-		cmds.revert(self.wd)
+		cmds.svn_revert(self.wd)
 	
 	def apply(self):
-		if cmd.svn_changes_exist(self.wd):
-			raise StashError('local changes exist; please stash or revert them.')
+		if cmds.svn_changes_exist(self.wd):
+			raise StashError('changes exist in "%s"; please stash or revert them.' % self.wd)
+		
+		#our working directory MUST be in sync with the server, otherwise file movement tracing would be a terrible
+		#mess. this is simpler and easier for everyone all around
+		cmds.svn_update(self.wd)
+		
+		revision = cmds.svn_revision(self.wd)
+		
+		#check to make sure that all the files in the patch are up-to-date
+		if revision != self.revision:
+			if revision - self.revision >= 25:
+				sys.stderr.write('Warning: this operation might take a while.')
+			
+			files = self.get_affected_files()
+			log = cmds.svn_log(self.wd, start=self.revision, end=revision)
+			moved_files = {}
+			
+			#trace each file in the diff and find its final resting place
+			for f in files:
+				final_path = f
+				for rev in log:
+					new_path = rev.get_new_path(f)
+					if new_path:
+						final_path = new_path
+					elif rev.was_deleted(f):
+						#warn the user if a file was removed, and give him the chance to abort
+						if not cmds.user_confirm('Warning: the file "%s" in the stash has been deleted. Continue?' % f):
+							raise StashError('dying by user request.')
+				
+				if final_path != f:
+					moved_files[f] = final_path
+			
+			cmds.diff_move_files(self.get_file_path(), moved_files)
+			
+			#we rewrote the diff file, let's not cause any errors on return
+			self.revision = revision
 		
 		cmds.patch(self.get_file_path())
+		
 		for f in self.get_affected_files():
 			if not os.path.exists(f):
 				continue
@@ -423,7 +562,7 @@ def dependencies():
 
 Prints the status of external dependencies for svnstash"""
 	
-	print 'External commands that svnstash relies on.  Only `svn` is required.'
+	print 'External commands that svnstash relies on.  Only `svn` (which includes `svnversion`) is required.'
 	
 	for r in EXTERNAL_DEPENDENCIES:
 		if isinstance(r, tuple):
@@ -471,6 +610,12 @@ Options:
 	
 	stashes[int(sys.argv[2])].dump(**opts)
 
+
+@command()
+def log():
+	for r in cmds.svn_log('.'):
+		print r
+	
 def main():
 	global stashes
 	
@@ -487,7 +632,8 @@ def main():
 		else:
 			help()
 	except StashError as e:
-		print 'Error: %s' % e.message
+		sys.stderr.write('Error: %s\n' % e.message)
+		sys.exit(1)
 
 env = Env()
 cmds = CmdTools()

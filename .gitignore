@@ -2,6 +2,9 @@
 
 *.py[co]
 
+# Test files
+test/test_zone/
+
 # Packages
 *.egg
 *.egg-info
