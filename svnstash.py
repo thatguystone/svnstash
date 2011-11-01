@@ -442,6 +442,9 @@ class Stash(object):
 						#warn the user if a file was removed, and give him the chance to abort
 						if not cmds.user_confirm('Warning: the file "%s" in the stash has been deleted. Continue?' % f):
 							raise StashError('dying by user request.')
+						
+						#make sure the deleted file in the diff doesn't touch any file that might be in its place now
+						final_path = '/does/not/exist/'
 				
 				if final_path != f:
 					moved_files[f] = final_path
