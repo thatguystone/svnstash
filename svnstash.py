@@ -15,6 +15,11 @@ try:
 except:
 	import pickle
 
+__author__ = 'Andrew Stone'
+__copyright__ = 'Copyright 2011, Andrew Stone'
+__status__ = 'Development'
+__version__ = 'pre-alpha'
+
 #useful constants
 STASH_PATH = '.svn/stash'
 EXTERNAL_DEPENDENCIES = ('svn', 'svnversion', 'lsdiff', ('cdiff', 'colordiff'))
@@ -74,6 +79,7 @@ class SvnRevision(object):
 	
 	def was_deleted(self, path):
 		""" Tells whether a path was deleted; will be True if the path was moved, too """
+		
 		for p in self.__rev.find('paths'):
 			if p.text.lstrip('/') == path and p.get('action') == STATUS.DELETED:
 				return True
@@ -81,6 +87,8 @@ class SvnRevision(object):
 		return False
 	
 	def get_new_path(self, path):
+		""" Checks if an `svn mv` happened in a commit, and return the new path for the file; None, otherwise. """
+		
 		for p in self.__rev.find('paths'):
 			copy_path = p.get('copyfrom-path')
 			if copy_path and copy_path.lstrip('/') == path:
@@ -95,6 +103,7 @@ class CmdTools(object):
 	diff_fi_len = len(diff_file_indicator)
 	
 	def get_root(self):
+		""" From a directory inside an svn repo, it walks to the svn root directory. """
 		wd = os.getcwd()
 		child = ''
 		parent = ''
@@ -116,36 +125,57 @@ class CmdTools(object):
 		}
 	
 	def svn_update(self, path):
+		""" Runs `svn update` on a path """
+		
 		subprocess.check_output(['svn', 'update', path])
 	
 	def svn_changes(self, child_dir):
+		""" An interable svn status in the form [('A', 'path/to/file'), ('M', 'path/to/another/file')] """
+		
 		return [(f[0], f[1:].strip()) for f in subprocess.check_output(['svn', 'status', child_dir]).split('\n')[:-1]]
 	
 	def svn_changes_exist(self, child_dir):
+		""" Checks `svn status` to see if changes exist. """
+		
 		return len(self.svn_changes(child_dir)) > 0
 	
 	def svn_write_diff(self, wd, f):
-		subprocess.Popen(['svn', 'diff', '--force', '--diff-cmd', '/usr/bin/diff', '-x', '-au --binary', wd], stdout=f).wait()
+		""" Write an svn diff to a file """
+		
+		subprocess.Popen(['svn', 'diff', '--force', '--diff-cmd', 'diff', '-x', '-au --binary', wd], stdout=f).wait()
 	
 	def svn_remove(self, path):
+		""" Remove a path from svn """
+		
 		subprocess.check_output(['svn', 'remove', '--force', path])
 	
 	def svn_add(self, path):
+		""" Add a path to svn """
 		subprocess.check_output(['svn', 'add', '-q', '--parents', path])
 	
 	def svn_revert(self, path):
+		""" Revert a path """
+		
 		subprocess.check_output(['svn', 'revert', '--depth=infinity', path])
 	
 	def svn_revision(self, path, from_server=False):
+		""" Get the svn revision of a path, optionally asking the svn server for the most recent revision """
+		
 		return int(subprocess.check_output(['svnversion', path]).strip('MSP\n').split(':')[int(from_server)])
 	
 	def svn_log(self, path, start=0, end='HEAD'):
+		""" Get an xml svn log of a path """
+		
 		return SvnLog(subprocess.check_output(['svn', 'log', '--xml', '-v', '-r', '%s:%s' % (str(start), str(end))]))
 	
 	def patch(self, diff_path):
+		""" Run `patch` on the given diff. """
+		
 		subprocess.Popen(['patch', '--forward', '-p0', '--binary', '--batch', '-s', '-i', diff_path], stderr=subprocess.PIPE, stdout=subprocess.PIPE).wait()
 	
 	def color_diff(self, diff_path):
+		""" Takes a diff file and gives it some color. """
+		
 		if not env.has_cdiff and not env.has_colordiff:
 			#term-ansicolor uses cdiff which will use colordiff if available, or fallback to its own stuff
 			raise StashError('you need to install the gem `term-ansicolor` or `colordiff` in order to get colored output.')
@@ -157,6 +187,8 @@ class CmdTools(object):
 				return subprocess.check_output(['colordiff'], stdin=f)
 	
 	def files_in_diff(self, diff, include_status=False):
+		""" Gets a list of all the files described in a diff. """
+		
 		if env.has_lsdiff:
 			args = ['lsdiff', diff]
 			include_status and args.append('--status')
@@ -174,6 +206,8 @@ class CmdTools(object):
 		return files
 	
 	def diff_move_files(self, diff, files):
+		""" A _very dirty_ file reader/writer that rewrites paths in a diff file. """
+		
 		orig_diff = diff + '.old'
 		shutil.move(diff, orig_diff)
 		
@@ -240,19 +274,29 @@ class Stashes(object):
 				raise StashError('could not create stash directory')
 	
 	def __len__(self):
+		""" The number of stashes being tracked """
+		
 		return len(self.__data)
 	
 	def __getitem__(self, i):
+		""" Get a stash object at i """
+		
 		return self.__data[i]
 	
 	def __delitem__(self, i):
+		""" Delete a stash """
+		
 		del self.__data[i]
 	
 	def cleanup(self):
+		""" Save any data that was modified during this run to the data file. """
+		
 		with open(self.__DATA_FILE, 'w') as f:
 			pickle.dump(self.__data, f)
 	
 	def list(self, show_files=False):
+		""" Print out a list of stashes to stdout, in human-readable form. """
+		
 		for i, s in enumerate(self.__data):
 			print '%-2d | %s' % (i, s.get_printable())
 			
@@ -265,10 +309,14 @@ class Stashes(object):
 				print SVN_DIVIDER
 	
 	def push(self, comment=''):
+		""" Save patch with [comment] and revert the working directory. """
+		
 		s = self.save(comment)
 		s.revert()
 	
 	def save(self, comment=''):
+		""" Save patch with [comment] without reverting the working directory. """
+		
 		if not cmds.svn_changes_exist(self.svn_env['child']):
 			raise StashError('there are no changes in working copy to stash')
 	
@@ -282,6 +330,8 @@ class Stashes(object):
 		return s
 	
 	def pop(self, i):
+		""" Apply patch i and remove it afterwards. """
+		
 		s = self.apply(i)
 		
 		s.delete()
@@ -289,6 +339,8 @@ class Stashes(object):
 		self.__data.remove(s)
 	
 	def apply(self, i):
+		""" Apply patch i without removing the patch afterwards """
+		
 		if i < 0 or len(self.__data) <= i:
 			raise StashError('no stash with index "%d" exists.' % i)
 		
@@ -316,6 +368,8 @@ class Stash(object):
 		return self.id
 	
 	def get_printable(self):
+		""" A printable (human-readble) summary of the patch. """
+		
 		return '%s | %s | %s %s' % (
 			self.size,
 			datetime.fromtimestamp(self.created).ctime(),
@@ -324,12 +378,18 @@ class Stash(object):
 		)
 	
 	def get_file_path(self):
+		""" The absolute path to this stash's diff file """
+		
 		return '%s/%s.diff' % (STASH_PATH, self.id)
 	
 	def get_affected_files(self, include_status=False):
+		""" Get the files affected by this stash """
+		
 		return cmds.files_in_diff(self.get_file_path(), include_status=include_status)
 			
 	def save(self):
+		""" Save the diff of the current working directory into a stash """
+		
 		#save the changes to the diff file
 		with open(self.get_file_path(), 'w') as diff:
 			cmds.svn_write_diff(self.wd, diff)
@@ -337,7 +397,8 @@ class Stash(object):
 		self.size = _human_readable_size(os.stat(self.get_file_path()).st_size)
 		
 	def revert(self):
-		#remove any added files
+		""" Remove any added files """
+		
 		for f in cmds.svn_changes(self.wd):
 			if f[0] == STATUS.ADDED:
 				#f[2:]: strip off the string "A "
@@ -346,6 +407,11 @@ class Stash(object):
 		cmds.svn_revert(self.wd)
 	
 	def apply(self):
+		"""
+			Apply the patch to the working directory without deleting the patch.
+			Follow any file path changes made since the patch so that we're up-to-date.
+		"""
+		
 		if cmds.svn_changes_exist(self.wd):
 			raise StashError('changes exist in "%s"; please stash or revert them.' % self.wd)
 		
@@ -353,6 +419,7 @@ class Stash(object):
 		#mess. this is simpler and easier for everyone all around
 		cmds.svn_update(self.wd)
 		
+		#since the wd is now up-to-date, finding the revision and doing our calculations is simple
 		revision = cmds.svn_revision(self.wd)
 		
 		#check to make sure that all the files in the patch are up-to-date
@@ -384,8 +451,10 @@ class Stash(object):
 			#we rewrote the diff file, let's not cause any errors on return
 			self.revision = revision
 		
+		#run the actual patch
 		cmds.patch(self.get_file_path())
 		
+		#do some svn cleanup
 		for f in self.get_affected_files():
 			if not os.path.exists(f):
 				continue
@@ -610,12 +679,6 @@ Options:
 	
 	stashes[int(sys.argv[2])].dump(**opts)
 
-
-@command()
-def log():
-	for r in cmds.svn_log('.'):
-		print r
-	
 def main():
 	global stashes
 	
