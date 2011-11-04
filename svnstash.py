@@ -130,7 +130,7 @@ class CmdTools(object):
 		subprocess.check_output(['svn', 'update', path])
 	
 	def svn_changes(self, child_dir):
-		""" An interable svn status in the form [('A', 'path/to/file'), ('M', 'path/to/another/file')] """
+		""" An interable svn status in the form [('A', 'path/to/file'), ('M', 'path/to/another/file')] ('A', 'M', etc from STATUS) """
 		
 		return [(f[0], f[1:].strip()) for f in subprocess.check_output(['svn', 'status', child_dir]).split('\n')[:-1]]
 	
@@ -281,10 +281,16 @@ class Stashes(object):
 	def __getitem__(self, i):
 		""" Get a stash object at i """
 		
+		if i < 0 or i >= len(self.__data):
+			raise StashError('no stash with index "%d" exists.' % i) 
+		
 		return self.__data[i]
 	
 	def __delitem__(self, i):
 		""" Delete a stash """
+		
+		if i < 0 or i >= len(self.__data):
+			raise StashError('no stash with index "%d" exists.' % i)
 		
 		del self.__data[i]
 	
@@ -336,15 +342,12 @@ class Stashes(object):
 		
 		s.delete()
 		
-		self.__data.remove(s)
+		del self[i]
 	
 	def apply(self, i):
 		""" Apply patch i without removing the patch afterwards """
 		
-		if i < 0 or len(self.__data) <= i:
-			raise StashError('no stash with index "%d" exists.' % i)
-		
-		s = self.__data[i]
+		s = self[i]
 		s.apply()
 		
 		return s
@@ -400,8 +403,8 @@ class Stash(object):
 		""" Remove any added files """
 		
 		for f in cmds.svn_changes(self.wd):
-			if f[0] == STATUS.ADDED:
-				#f[2:]: strip off the string "A "
+			#check path exists in case we delete a directory that contained added files
+			if f[0] == STATUS.ADDED and os.path.exists(f[1]):
 				cmds.svn_remove(f[1])
 		
 		cmds.svn_revert(self.wd)
@@ -425,7 +428,7 @@ class Stash(object):
 		#check to make sure that all the files in the patch are up-to-date
 		if revision != self.revision:
 			if revision - self.revision >= 25:
-				sys.stderr.write('Warning: this operation might take a while.')
+				sys.stderr.write('Warning: this operation might take a while.\n')
 			
 			files = self.get_affected_files()
 			log = cmds.svn_log(self.wd, start=self.revision, end=revision)
@@ -471,7 +474,7 @@ class Stash(object):
 		os.remove(self.get_file_path())
 	
 	def dump(self, with_color=False):
-		if with_color:
+		if with_color and (env.has_cdiff or env.has_colordiff):
 			print cmds.color_diff(self.get_file_path())
 		else:
 			with open(self.get_file_path()) as f:
@@ -524,28 +527,22 @@ def _human_readable_size(num):
 		num /= 1024.0
 
 def _bash():
-	global stashes
+	args = len(sys.argv)
 	
-	try:
-		args = len(sys.argv)
-		
-		#TODO - better bash searching for stashes
-		
-		if args > 3:
-			pass
-		elif args > 2 and sys.argv[2].strip() in commands.keys() and sys.argv[2][-1] != ' ':
-			print '%s ' % sys.argv[2]
-		elif args == 3:
-			arg = sys.argv[2]
-			for k in commands.keys():
-				if k.startswith(arg):
-					print '%s ' % k
-		else:
-			for k in commands.keys():
-				print k
-	except StashError:
-		print '<error>'
-		sys.exit()
+	#TODO - better bash searching for stashes
+	
+	if args > 3:
+		pass
+	elif args > 2 and sys.argv[2].strip() in commands.keys() and sys.argv[2][-1] != ' ':
+		print '%s ' % sys.argv[2]
+	elif args == 3:
+		arg = sys.argv[2]
+		for k in commands.keys():
+			if k.startswith(arg):
+				print '%s ' % k
+	else:
+		for k in commands.keys():
+			print k
 
 @command()
 def apply():
@@ -558,7 +555,7 @@ Applies the most recent stash or the one given by [index] without deleting the s
 	else:
 		i = 0
 	
-	stashes.apply(id)	
+	stashes.apply(i)
 
 @command()
 def help():
@@ -660,27 +657,27 @@ Saves everything in the working directory, with an optional [comment], without r
 
 @command()
 def show():
-	""" usage: svnstash show index [options]
+	""" usage: svnstash show [options] index
 
 Show the changes made in the given stash.  Be careful with binary diffs.
 
 Options:
-	-c, --with-color	Shows the diff with colored output"""
-	
-	if len(sys.argv) < 3:
-		raise StashError('you must provide an index to show')
+	-b, --no-color	Shows the diff without colored output"""
 	
 	opts = {
-		'with_color': False
+		'with_color': True
 	}
 	
-	optlist, args = getopt.getopt(sys.argv[3:], 'c', ['with-color'])
+	optlist, args = getopt.getopt(sys.argv[2:], 'b', ['no-color'])
 	
 	for o, a in optlist:
-		if o in ('-c', '--with-color'):
-			opts['with_color'] = True
+		if o in ('-b', '--no-color'):
+			opts['with_color'] = False
 	
-	stashes[int(sys.argv[2])].dump(**opts)
+	if not len(args):
+		raise StashError('you must provide an index to show')
+	
+	stashes[int(args[0])].dump(**opts)
 
 def main():
 	global stashes
@@ -700,6 +697,9 @@ def main():
 	except StashError as e:
 		sys.stderr.write('Error: %s\n' % e.message)
 		sys.exit(1)
+	except getopt.GetoptError as e:
+		sys.stderr.write('Options error: %s\n' % e.msg)
+		sys.exit(2)
 
 env = Env()
 cmds = CmdTools()
