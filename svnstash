@@ -631,7 +631,7 @@ def dependencies():
 
 Prints the status of external dependencies for svnstash"""
 	
-	print 'External commands that svnstash relies on.  Only `svn` (which includes `svnversion`) is required.'
+	print 'External commands that svnstash uses.  Only `svn` (which includes `svnversion`) is required.'
 	
 	for r in EXTERNAL_DEPENDENCIES:
 		if isinstance(r, tuple):
