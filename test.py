@@ -13,7 +13,7 @@ from unittest import skipIf
 import svnstash
 from svnstash import cmds
 
-run = 'TestMoved'
+run = 'all'
 
 svnstash.interactive = False
 
