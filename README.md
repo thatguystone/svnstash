@@ -2,6 +2,12 @@
 
 An svn extension that adds stashing to the repository.
 
+## Installation
+
+- Copy the file "svnstash" to a directory in your path (ie. ~/bin), make it executable, and enjoy.
+- It should just work (provided you have subversion installed and in your path).
+- If you want access to some extra features, `svnstash dependencies` will tell you what you need to install.
+
 ## Features
 
 * Stashes working directory to repository level so you'll never lose it.
