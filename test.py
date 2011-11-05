@@ -13,7 +13,7 @@ from unittest import skipIf
 import svnstash
 from svnstash import cmds
 
-run = 'all'
+run = 'TestMoved'
 
 svnstash.interactive = False
 
@@ -436,6 +436,60 @@ class TestBinary(Base):
 		for f in fs:
 			assert os.path.basename(f[1]) in files
 
+@skipIf(run not in ('all', 'TestMoved'), '')
+class TestMoved(Base):
+	"""
+		Test files that were `svn mv`'d (svn handles this poorly, and it fails). If svn fixes it,
+		this should fail!
+	"""
+	
+	file = 'a_few_lines'
+	file_moved = file + '_moved'
+	file_mod = 'SingleTextChanges/a_few_lines'
+	
+	def test_1(self):
+		_copy(self.file)
+		_commit()
+		_mv(self.file, self.file_moved)
+		
+		fs = cmds.svn_changes(CLIENT_DIR)
+		assert len(fs) == 2
+		
+		_command('push')
+		
+		assert not cmds.svn_changes_exist(CLIENT_DIR)
+		
+		_command('pop')
+		
+		fs = cmds.svn_changes(CLIENT_DIR)
+		assert len(fs) == 1
+		assert os.path.basename(fs[0][0]) == svnstash.STATUS.DELETED
+		assert os.path.basename(fs[0][1]) == self.file
+	
+	def test_2(self):
+		_copy(self.file)
+		_commit()
+		_mv(self.file, self.file_moved)
+		
+		#modify the copied file...still doesn't work :(
+		_copy(self.file_mod, self.file_moved)
+		
+		fs = cmds.svn_changes(CLIENT_DIR)
+		assert len(fs) == 2
+		
+		_command('push')
+		
+		print _command('show', '0')[0]
+		
+		assert not cmds.svn_changes_exist(CLIENT_DIR)
+		
+		_command('pop')
+		
+		fs = cmds.svn_changes(CLIENT_DIR)
+		assert len(fs) == 1
+		assert os.path.basename(fs[0][0]) == svnstash.STATUS.DELETED
+		assert os.path.basename(fs[0][1]) == self.file
+	
 if __name__== "__main__":
 	import nose
 	

@@ -18,7 +18,7 @@ except:
 __author__ = 'Andrew Stone'
 __copyright__ = 'Copyright 2011, Andrew Stone'
 __status__ = 'Development'
-__version__ = 'pre-alpha'
+__version__ = 'alpha'
 
 #useful constants
 STASH_PATH = '.svn/stash'
@@ -132,7 +132,7 @@ class CmdTools(object):
 	def svn_changes(self, child_dir):
 		""" An interable svn status in the form [('A', 'path/to/file'), ('M', 'path/to/another/file')] ('A', 'M', etc from STATUS) """
 		
-		return [(f[0], f[1:].strip()) for f in subprocess.check_output(['svn', 'status', child_dir]).split('\n')[:-1]]
+		return [(f[0], f[1:].strip('+ ')) for f in subprocess.check_output(['svn', 'status', child_dir]).split('\n')[:-1]]
 	
 	def svn_changes_exist(self, child_dir):
 		""" Checks `svn status` to see if changes exist. """
