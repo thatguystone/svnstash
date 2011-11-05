@@ -103,7 +103,6 @@ class Base(object):
 		
 	def tearDown(self):
 		#clear all the test data
-		return
 		shutil.rmtree(TEST_ZONE)
 
 @skipIf(run not in ('all', 'TestCoverage'), '')
