@@ -1,6 +1,7 @@
 #!/usr/bin/env python2.7
 
 import os
+import hashlib
 import shutil
 from cStringIO import StringIO
 import subprocess
@@ -12,7 +13,7 @@ from unittest import skipIf
 import svnstash
 from svnstash import cmds
 
-run = 'TestDirectories'
+run = 'all'
 
 svnstash.interactive = False
 
@@ -68,6 +69,13 @@ def _client_file(client_path):
 def _copy(file_path, client_path=''):
 	subprocess.check_output(['cp', '-a', _test_file(file_path), _client_file(client_path)])
 	_add()
+	
+def _md5(file_path):
+	md5 = hashlib.md5()
+	with open(file_path,'rb') as f: 
+		for chunk in iter(lambda: f.read(8192), ''): 
+			md5.update(chunk)
+	return md5.hexdigest()
 
 class Base(object):
 	""" Basic setup for every test case """
@@ -95,18 +103,18 @@ class Base(object):
 		
 	def tearDown(self):
 		#clear all the test data
+		return
 		shutil.rmtree(TEST_ZONE)
 
-@skipIf(run not in ('all', 'TestBase'), '')
-def TestBase(Base):
+@skipIf(run not in ('all', 'TestCoverage'), '')
+class TestCoverage(Base):
+	""" Make coverage happier """
+	
 	def test_import(self):
-		""" Make coverage happier """
-		
 		reload(svnstash)
 		svnstash.interactive = False
 	
 	def test_dependencies(self):
-		""" Make coverage happier """
 		_command('dependencies')
 
 @skipIf(run not in ('all', 'TestBash'), '')
@@ -130,19 +138,16 @@ class TestClean(Base):
 	file = 'a_few_lines'
 	
 	def test_ls(self):
-		""" Make sure nothing is stashed """
-		
+		#Make sure nothing is stashed
 		assert len(_command('list')[0]) == 0
 	
 	def test_pop(self):
-		""" Make sure nothing can be popped """
-		
+		#Make sure nothing can be popped
 		assert_raises(SystemExit, _command, 'pop')
 		assert not cmds.svn_changes_exist(CLIENT_DIR)
 	
 	def test_push(self):
-		""" Make sure nothing can be pushed """
-		
+		#Make sure nothing can be pushed
 		assert_raises(SystemExit, _command, 'push')
 		self.test_ls()
 	
@@ -340,6 +345,8 @@ class TestSingleTextChanges(Base):
 
 @skipIf(run not in ('all', 'TestDirectories'), '')
 class TestDirectories(Base):
+	""" Test that directory stashing works """
+	
 	foo = 'TestDirectories/foo'
 	foo_mod = 'TestDirectories/foo_mod'
 	bar = 'TestDirectories/bar'
@@ -388,9 +395,46 @@ class TestDirectories(Base):
 
 @skipIf(run not in ('all', 'TestBinary'), '')
 class TestBinary(Base):
+	""" Test modifications to binary files """
+	
+	hi = 'TestBinary/hi.jpg'
+	hi_mod = 'TestBinary/hi_mod.jpg'
+	
+	file = 'a_few_lines'
+	
 	def test_1(self):
-		pass
-		#TODO - test some binary files!
+		#make sure basic binary stashing works
+		_copy(self.hi)
+		_commit()
+		_copy(self.hi_mod, 'hi.jpg')
+		
+		_command('push')
+		_command('pop')
+		
+		assert _md5(_test_file(self.hi_mod)) == _md5(_client_file('hi.jpg'))
+		
+	def test_2(self):
+		#binary with text
+		_copy(self.hi)
+		_copy(self.file)
+		
+		files = ('hi.jpg', self.file)
+		
+		_command('push')
+		
+		s = svnstash.Stashes()[0]
+		
+		fs = s.get_affected_files()
+		assert len(fs) == len(files)
+		for f in fs:
+			assert f in files
+		
+		_command('pop')
+		
+		fs = cmds.svn_changes(CLIENT_DIR)
+		assert len(fs) == len(files)
+		for f in fs:
+			assert os.path.basename(f[1]) in files
 
 if __name__== "__main__":
 	import nose
